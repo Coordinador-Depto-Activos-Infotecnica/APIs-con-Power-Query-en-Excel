@@ -1,0 +1,305 @@
+let
+    // ============================================================
+    // SOLO CAMBIAR ESTE ID DE LÍNEA
+    // ============================================================
+    LineaId = "561",
+
+    BaseURL = "http://activos-tx-prod.appspot.com/api/v1/",
+
+
+    // ============================================================
+    // FUNCIÓN GENERAL PARA CONSULTAR DEPENDANTS
+    // Retorna una tabla con:
+    // Id
+    // Nombre
+    // TipoElemento
+    // ============================================================
+    GetDependants = (Tipo as text, IdConsulta as text) as table =>
+        let
+            URL = BaseURL & Tipo & "/" & IdConsulta & "/dependants/",
+
+            Origen =
+                try
+                    Json.Document(
+                        Web.Contents(URL)
+                    )
+                otherwise
+                    null,
+
+            Results =
+                if
+                    Origen <> null
+                    and Value.Is(Origen, type record)
+                    and Record.HasFields(Origen, "results")
+                then
+                    Origen[results]
+                else
+                    {},
+
+            // Extraer todos los "result" contenidos
+            ListaResultados =
+                List.Combine(
+                    List.Transform(
+                        Results,
+                        each
+                            if
+                                Value.Is(_, type record)
+                                and Record.HasFields(_, "result")
+                                and Value.Is(_[result], type list)
+                            then
+                                _[result]
+                            else
+                                {}
+                    )
+                ),
+
+            // Crear tabla
+            TablaResultados =
+                if List.Count(ListaResultados) > 0 then
+                    Table.FromRecords(ListaResultados)
+                else
+                    #table(
+                        type table [
+                            id = nullable text,
+                            name = nullable text
+                        ],
+                        {}
+                    ),
+
+            // Mantener solamente las columnas necesarias
+            ColumnasSeleccionadas =
+                Table.SelectColumns(
+                    TablaResultados,
+                    {"id", "name"},
+                    MissingField.UseNull
+                ),
+
+            // Cambiar nombres
+            ColumnasRenombradas =
+                Table.RenameColumns(
+                    ColumnasSeleccionadas,
+                    {
+                        {"id", "Id"},
+                        {"name", "Nombre"}
+                    },
+                    MissingField.Ignore
+                ),
+
+            // Convertir a texto
+            TiposCorregidos =
+                Table.TransformColumnTypes(
+                    ColumnasRenombradas,
+                    {
+                        {"Id", type text},
+                        {"Nombre", type text}
+                    }
+                )
+        in
+            TiposCorregidos,
+
+
+    // ============================================================
+    // NIVEL 1
+    // LINEA -> CIRCUITOS
+    // ============================================================
+    ConsultaCircuitos =
+        GetDependants(
+            "lineas",
+            Text.From(LineaId)
+        ),
+
+    CircuitosRenombrados =
+        Table.RenameColumns(
+            ConsultaCircuitos,
+            {
+                {"Id", "CircuitoId"},
+                {"Nombre", "NombreCircuito"}
+            },
+            MissingField.Ignore
+        ),
+
+    AgregarLineaId =
+        Table.AddColumn(
+            CircuitosRenombrados,
+            "LineaId",
+            each Text.From(LineaId),
+            type text
+        ),
+
+    OrdenCircuitos =
+        Table.ReorderColumns(
+            AgregarLineaId,
+            {
+                "LineaId",
+                "CircuitoId",
+                "NombreCircuito"
+            },
+            MissingField.Ignore
+        ),
+
+
+    // ============================================================
+    // NIVEL 2
+    // CIRCUITOS -> TRAMOS
+    // ============================================================
+    AgregarTramos =
+        Table.AddColumn(
+            OrdenCircuitos,
+            "DatosTramos",
+            each
+                if [CircuitoId] <> null
+                    and Text.Trim(Text.From([CircuitoId])) <> ""
+                then
+                    GetDependants(
+                        "circuitos",
+                        Text.From([CircuitoId])
+                    )
+                else
+                    #table(
+                        type table [
+                            Id = nullable text,
+                            Nombre = nullable text
+                        ],
+                        {}
+                    )
+        ),
+
+    ExpandirTramos =
+        Table.ExpandTableColumn(
+            AgregarTramos,
+            "DatosTramos",
+            {
+                "Id",
+                "Nombre"
+            },
+            {
+                "TramoId",
+                "NombreTramo"
+            }
+        ),
+
+
+    // ============================================================
+    // NIVEL 3
+    // TRAMOS -> VANOS
+    // ============================================================
+    AgregarVanos =
+        Table.AddColumn(
+            ExpandirTramos,
+            "DatosVanos",
+            each
+                if [TramoId] <> null
+                    and Text.Trim(Text.From([TramoId])) <> ""
+                then
+                    GetDependants(
+                        "tramos",
+                        Text.From([TramoId])
+                    )
+                else
+                    #table(
+                        type table [
+                            Id = nullable text,
+                            Nombre = nullable text
+                        ],
+                        {}
+                    )
+        ),
+
+    ExpandirVanos =
+        Table.ExpandTableColumn(
+            AgregarVanos,
+            "DatosVanos",
+            {
+                "Id",
+                "Nombre"
+            },
+            {
+                "VanoId",
+                "NombreVano"
+            }
+        ),
+
+
+    // ============================================================
+    // NIVEL 4
+    // VANOS -> ELEMENTOS
+    // ============================================================
+    AgregarElementos =
+        Table.AddColumn(
+            ExpandirVanos,
+            "DatosElementos",
+            each
+                if [VanoId] <> null
+                    and Text.Trim(Text.From([VanoId])) <> ""
+                then
+                    GetDependants(
+                        "vanos",
+                        Text.From([VanoId])
+                    )
+                else
+                    #table(
+                        type table [
+                            Id = nullable text,
+                            Nombre = nullable text
+                        ],
+                        {}
+                    )
+        ),
+
+    ExpandirElementos =
+        Table.ExpandTableColumn(
+            AgregarElementos,
+            "DatosElementos",
+            {
+                "Id",
+                "Nombre"
+            },
+            {
+                "ElementoId",
+                "NombreElemento"
+            }
+        ),
+
+
+    // ============================================================
+    // TIPOS DE DATOS
+    // ============================================================
+    TiposFinales =
+        Table.TransformColumnTypes(
+            ExpandirElementos,
+            {
+                {"LineaId", type text},
+                {"CircuitoId", type text},
+                {"NombreCircuito", type text},
+                {"TramoId", type text},
+                {"NombreTramo", type text},
+                {"VanoId", type text},
+                {"NombreVano", type text},
+                {"ElementoId", type text},
+                {"NombreElemento", type text}
+            }
+        ),
+
+
+    // ============================================================
+    // ORDEN FINAL DE COLUMNAS
+    // ============================================================
+    ResultadoFinal =
+        Table.ReorderColumns(
+            TiposFinales,
+            {
+                "LineaId",
+                "CircuitoId",
+                "NombreCircuito",
+                "TramoId",
+                "NombreTramo",
+                "VanoId",
+                "NombreVano",
+                "ElementoId",
+                "NombreElemento"
+            },
+            MissingField.Ignore
+        )
+
+in
+    ResultadoFinal
